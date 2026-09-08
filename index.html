@@ -1,0 +1,687 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>EasyBeat Maker</title>
+  <meta name="description" content="Super einfache KI-Musikproduktion für Anfänger. Ein Wunsch, ein Klick, ein Song." />
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600;700&display=swap" rel="stylesheet" />
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script>
+    tailwind.config = {
+      theme: {
+        extend: {
+          fontFamily: { sans: ["Outfit", "system-ui", "sans-serif"] },
+          colors: {
+            ink: {
+              950: "#07070b",
+              900: "#0c0c14",
+              800: "#141422",
+              700: "#1c1c2e",
+              600: "#2a2a42",
+            },
+            neon: {
+              DEFAULT: "#7c6cff",
+              soft: "#a99bff",
+              glow: "#5eead4",
+            },
+          },
+          boxShadow: {
+            glow: "0 0 40px rgba(124, 108, 255, 0.28)",
+            card: "0 20px 60px rgba(0, 0, 0, 0.45)",
+          },
+        },
+      },
+    };
+  </script>
+  <style>
+    html, body { background: #07070b; }
+    body { min-height: 100vh; }
+    .noise {
+      background-image: radial-gradient(ellipse at top, rgba(124,108,255,0.12), transparent 55%),
+                        radial-gradient(ellipse at bottom, rgba(94,234,212,0.06), transparent 50%);
+    }
+    .eq-bar { transform-origin: bottom; animation: eq 0.9s ease-in-out infinite; }
+    .eq-bar:nth-child(2) { animation-delay: .12s; }
+    .eq-bar:nth-child(3) { animation-delay: .24s; }
+    .eq-bar:nth-child(4) { animation-delay: .08s; }
+    .eq-bar:nth-child(5) { animation-delay: .2s; }
+    @keyframes eq {
+      0%, 100% { transform: scaleY(0.35); }
+      50% { transform: scaleY(1); }
+    }
+    input[type="range"] {
+      -webkit-appearance: none;
+      appearance: none;
+      height: 6px;
+      border-radius: 999px;
+      background: #2a2a42;
+      outline: none;
+    }
+    input[type="range"]::-webkit-slider-thumb {
+      -webkit-appearance: none;
+      width: 16px;
+      height: 16px;
+      border-radius: 50%;
+      background: #a99bff;
+      cursor: pointer;
+      box-shadow: 0 0 0 4px rgba(124,108,255,0.2);
+    }
+    textarea:focus, select:focus, button:focus-visible {
+      outline: none;
+    }
+  </style>
+</head>
+<body class="noise text-slate-100 antialiased">
+  <div id="root"></div>
+
+  <script src="https://unpkg.com/react@18.3.1/umd/react.production.min.js" crossorigin="anonymous"></script>
+  <script src="https://unpkg.com/react-dom@18.3.1/umd/react-dom.production.min.js" crossorigin="anonymous"></script>
+  <script src="https://unpkg.com/@babel/standalone@7.26.7/babel.min.js" crossorigin="anonymous"></script>
+
+  <script type="text/babel" data-presets="react">
+    const { useState, useRef, useEffect, useMemo } = React;
+
+    const GENRES = [
+      { id: "pop", label: "Pop" },
+      { id: "rock", label: "Rock" },
+      { id: "electronic", label: "Electronic" },
+      { id: "chillhop", label: "Chillhop" },
+    ];
+
+    const PRESETS = {
+      pop:        { bpm: 118, swing: 0.00, scale: [0,2,4,5,7,9,11], root: 48, mood: 1 },
+      rock:       { bpm: 126, swing: 0.00, scale: [0,2,3,5,7,8,10], root: 40, mood: 0 },
+      electronic: { bpm: 124, swing: 0.00, scale: [0,2,3,5,7,8,10], root: 36, mood: 0 },
+      chillhop:   { bpm: 86,  swing: 0.18, scale: [0,2,3,5,7,9,10], root: 45, mood: 1 },
+    };
+
+    function hashString(str) {
+      let h = 2166136261;
+      for (let i = 0; i < str.length; i++) {
+        h ^= str.charCodeAt(i);
+        h = Math.imul(h, 16777619);
+      }
+      return h >>> 0;
+    }
+
+    function mulberry32(a) {
+      return function () {
+        a |= 0; a = a + 0x6D2B79F5 | 0;
+        let t = Math.imul(a ^ a >>> 15, 1 | a);
+        t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t;
+        return ((t ^ t >>> 14) >>> 0) / 4294967296;
+      };
+    }
+
+    function noteFreq(midi) {
+      return 440 * Math.pow(2, (midi - 69) / 12);
+    }
+
+    function env(t, a, d, s, r, dur) {
+      if (t < 0 || t > dur + r) return 0;
+      if (t < a) return t / a;
+      if (t < a + d) return 1 - (1 - s) * ((t - a) / d);
+      if (t < dur) return s;
+      return s * Math.max(0, 1 - (t - dur) / r);
+    }
+
+    function clamp(v, a, b) { return Math.max(a, Math.min(b, v)); }
+
+    function detectHints(prompt) {
+      const p = prompt.toLowerCase();
+      return {
+        guitar: /gitarre|guitar|akustik|acoustic/.test(p),
+        vocal: /gesang|vocal|stimme|sing/.test(p),
+        happy: /fröhlich|froh|happy|sommer|dance|party|uplifting/.test(p),
+        sad: /traurig|sad|melanch|ruhig|night|nacht/.test(p),
+        piano: /klavier|piano/.test(p),
+        bass: /bass|wuchtig|kräftig/.test(p),
+      };
+    }
+
+    function generateTrack(prompt, genre, mix) {
+      const preset = PRESETS[genre] || PRESETS.pop;
+      const hints = detectHints(prompt);
+      const seed = hashString(prompt + "|" + genre);
+      const rand = mulberry32(seed);
+
+      let bpm = preset.bpm;
+      if (hints.happy) bpm += 6;
+      if (hints.sad) bpm -= 8;
+
+      const sr = 44100;
+      const beats = 32;
+      const beatDur = 60 / bpm;
+      const duration = beats * beatDur;
+      const n = Math.floor(duration * sr);
+      const drums = new Float32Array(n);
+      const bass = new Float32Array(n);
+      const melody = new Float32Array(n);
+      const vocals = new Float32Array(n);
+
+      const scale = preset.scale;
+      const root = preset.root + (hints.happy ? 4 : 0) + (hints.sad ? -2 : 0);
+
+      const chordProg = hints.sad
+        ? [0, 5, 3, 4]
+        : genre === "rock"
+          ? [0, 3, 5, 0]
+          : [0, 4, 5, 3];
+
+      const kickPattern = genre === "rock"
+        ? [1,0,0,0, 1,0,0,1, 1,0,0,0, 1,0,1,0]
+        : genre === "chillhop"
+          ? [1,0,0,0, 0,0,1,0, 0,0,0,0, 1,0,0,0]
+          : [1,0,0,0, 1,0,0,0, 1,0,0,0, 1,0,0,0];
+
+      const snarePattern = genre === "electronic"
+        ? [0,0,0,0, 1,0,0,0, 0,0,0,0, 1,0,0,1]
+        : [0,0,0,0, 1,0,0,0, 0,0,0,0, 1,0,0,0];
+
+      const hatPattern = genre === "chillhop"
+        ? [1,0,1,1, 1,0,1,0, 1,0,1,1, 1,0,1,0]
+        : [1,0,1,0, 1,0,1,0, 1,0,1,0, 1,0,1,0];
+
+      function writeKick(at) {
+        const len = Math.floor(0.22 * sr);
+        for (let i = 0; i < len && at + i < n; i++) {
+          const t = i / sr;
+          const f = 140 * Math.exp(-t * 18) + 38;
+          const e = Math.exp(-t * 14);
+          drums[at + i] += Math.sin(2 * Math.PI * f * t) * e * 0.95;
+        }
+      }
+
+      function writeSnare(at) {
+        const len = Math.floor(0.18 * sr);
+        for (let i = 0; i < len && at + i < n; i++) {
+          const t = i / sr;
+          const noise = (rand() * 2 - 1);
+          const tone = Math.sin(2 * Math.PI * 190 * t);
+          const e = Math.exp(-t * 22);
+          drums[at + i] += (noise * 0.7 + tone * 0.3) * e * 0.55;
+        }
+      }
+
+      function writeHat(at, open) {
+        const len = Math.floor((open ? 0.12 : 0.045) * sr);
+        for (let i = 0; i < len && at + i < n; i++) {
+          const t = i / sr;
+          const noise = (rand() * 2 - 1);
+          const e = Math.exp(-t * (open ? 18 : 55));
+          drums[at + i] += noise * e * (open ? 0.18 : 0.12);
+        }
+      }
+
+      function writeBassNote(at, midi, noteLen) {
+        const len = Math.floor(noteLen * sr);
+        const f = noteFreq(midi);
+        for (let i = 0; i < len && at + i < n; i++) {
+          const t = i / sr;
+          const e = env(t, 0.01, 0.08, 0.7, 0.08, noteLen * 0.85);
+          const wave = Math.sin(2 * Math.PI * f * t) * 0.7
+                     + Math.sin(2 * Math.PI * f * 2 * t) * 0.18;
+          bass[at + i] += wave * e * 0.55;
+        }
+      }
+
+      function writeLead(at, midi, noteLen, bright) {
+        const len = Math.floor(noteLen * sr);
+        const f = noteFreq(midi);
+        for (let i = 0; i < len && at + i < n; i++) {
+          const t = i / sr;
+          const e = env(t, 0.01, 0.12, 0.55, 0.12, noteLen * 0.8);
+          const tri = 2 * Math.abs(2 * ((f * t) % 1) - 1) - 1;
+          const sine = Math.sin(2 * Math.PI * f * t);
+          const wave = bright ? tri * 0.55 + sine * 0.45 : sine;
+          melody[at + i] += wave * e * 0.32;
+        }
+      }
+
+      function writePad(at, midi, noteLen) {
+        const len = Math.floor(noteLen * sr);
+        const f = noteFreq(midi);
+        for (let i = 0; i < len && at + i < n; i++) {
+          const t = i / sr;
+          const e = env(t, 0.04, 0.2, 0.5, 0.2, noteLen * 0.9);
+          melody[at + i] += Math.sin(2 * Math.PI * f * t) * e * 0.12
+                         + Math.sin(2 * Math.PI * f * 1.005 * t) * e * 0.08;
+        }
+      }
+
+      function writeVocal(at, midi, noteLen) {
+        const len = Math.floor(noteLen * sr);
+        const f = noteFreq(midi);
+        for (let i = 0; i < len && at + i < n; i++) {
+          const t = i / sr;
+          const e = env(t, 0.03, 0.1, 0.65, 0.15, noteLen * 0.75);
+          const vib = 1 + 0.006 * Math.sin(2 * Math.PI * 5.2 * t);
+          const v = Math.sin(2 * Math.PI * f * vib * t)
+                  + 0.25 * Math.sin(2 * Math.PI * f * 2 * vib * t);
+          vocals[at + i] += v * e * 0.28;
+        }
+      }
+
+      const steps = beats * 4;
+      for (let step = 0; step < steps; step++) {
+        const swing = (step % 2 === 1) ? preset.swing * beatDur * 0.25 : 0;
+        const t0 = (step * beatDur) / 4 + swing;
+        const at = Math.floor(t0 * sr);
+        const idx = step % 16;
+        if (kickPattern[idx]) writeKick(at);
+        if (snarePattern[idx]) writeSnare(at);
+        if (hatPattern[idx]) writeHat(at, genre === "electronic" && idx % 8 === 7);
+
+        const bar = Math.floor(step / 16);
+        const chord = chordProg[bar % chordProg.length];
+        const chordRoot = root + chord;
+
+        if (step % 4 === 0) {
+          const bassOct = genre === "electronic" ? 12 : 0;
+          writeBassNote(at, chordRoot - 12 + bassOct, beatDur * 0.9);
+        }
+
+        if (step % 16 === 0) {
+          writePad(at, chordRoot + 12, beatDur * 4);
+          writePad(at, chordRoot + 12 + 7, beatDur * 4);
+        }
+
+        if (step % 2 === 0) {
+          const deg = scale[Math.floor(rand() * scale.length)];
+          writeLead(at, root + chord + deg + 24, beatDur * (0.35 + rand() * 0.4), hints.guitar || genre === "rock");
+        }
+
+        if ((hints.vocal || genre === "pop") && step % 8 === 0) {
+          const deg = scale[(bar + step) % scale.length];
+          writeVocal(at, root + chord + deg + 24, beatDur * 1.6);
+        }
+      }
+
+      const mixDrums = (mix.drums ?? 80) / 100;
+      const mixBass = (mix.bass ?? 75) / 100;
+      const mixMel = (mix.instruments ?? 70) / 100;
+      const mixVoc = (mix.vocals ?? 65) / 100;
+
+      const out = new Float32Array(n);
+      let peak = 0.0001;
+      for (let i = 0; i < n; i++) {
+        const s = drums[i] * mixDrums + bass[i] * mixBass + melody[i] * mixMel + vocals[i] * mixVoc;
+        out[i] = s;
+        peak = Math.max(peak, Math.abs(s));
+      }
+      const gain = 0.88 / peak;
+      for (let i = 0; i < n; i++) {
+        const fadeIn = clamp(i / (sr * 0.04), 0, 1);
+        const fadeOut = clamp((n - i) / (sr * 0.25), 0, 1);
+        out[i] = Math.tanh(out[i] * gain * 1.15) * fadeIn * fadeOut;
+      }
+
+      return { samples: out, sampleRate: sr, duration, bpm, seed };
+    }
+
+    function encodeWav(samples, sampleRate) {
+      const buffer = new ArrayBuffer(44 + samples.length * 2);
+      const view = new DataView(buffer);
+      const writeStr = (off, str) => { for (let i = 0; i < str.length; i++) view.setUint8(off + i, str.charCodeAt(i)); };
+      writeStr(0, "RIFF");
+      view.setUint32(4, 36 + samples.length * 2, true);
+      writeStr(8, "WAVE");
+      writeStr(12, "fmt ");
+      view.setUint32(16, 16, true);
+      view.setUint16(20, 1, true);
+      view.setUint16(22, 1, true);
+      view.setUint32(24, sampleRate, true);
+      view.setUint32(28, sampleRate * 2, true);
+      view.setUint16(32, 2, true);
+      view.setUint16(34, 16, true);
+      writeStr(36, "data");
+      view.setUint32(40, samples.length * 2, true);
+      let o = 44;
+      for (let i = 0; i < samples.length; i++, o += 2) {
+        const s = clamp(samples[i], -1, 1);
+        view.setInt16(o, s < 0 ? s * 0x8000 : s * 0x7fff, true);
+      }
+      return new Blob([buffer], { type: "audio/wav" });
+    }
+
+    function formatTime(sec) {
+      if (!isFinite(sec) || sec < 0) sec = 0;
+      const m = Math.floor(sec / 60);
+      const s = Math.floor(sec % 60);
+      return m + ":" + String(s).padStart(2, "0");
+    }
+
+    function slugify(text) {
+      return (text || "easybeat-song")
+        .toLowerCase()
+        .replace(/[^a-z0-9äöüß]+/gi, "-")
+        .replace(/^-|-$/g, "")
+        .slice(0, 40) || "easybeat-song";
+    }
+
+    function IconPlay() {
+      return (
+        <svg viewBox="0 0 24 24" className="w-7 h-7 fill-current ml-0.5">
+          <path d="M8 5.14v13.72L19.5 12 8 5.14z" />
+        </svg>
+      );
+    }
+
+    function IconPause() {
+      return (
+        <svg viewBox="0 0 24 24" className="w-7 h-7 fill-current">
+          <path d="M7 5h3.5v14H7V5zm6.5 0H17v14h-3.5V5z" />
+        </svg>
+      );
+    }
+
+    function IconDownload() {
+      return (
+        <svg viewBox="0 0 24 24" className="w-5 h-5 fill-current">
+          <path d="M12 3a1 1 0 011 1v9.6l3.3-3.3 1.4 1.4L12 17.4 6.3 11.7l1.4-1.4L11 13.6V4a1 1 0 011-1zm-7 16h14v2H5v-2z" />
+        </svg>
+      );
+    }
+
+    function App() {
+      const [prompt, setPrompt] = useState("Fröhlicher Pop-Song mit Gitarre und klarem Gesang");
+      const [genre, setGenre] = useState("pop");
+      const [status, setStatus] = useState("idle");
+      const [song, setSong] = useState(null);
+      const [advancedOpen, setAdvancedOpen] = useState(false);
+      const [mix, setMix] = useState({ vocals: 70, instruments: 72, drums: 78, bass: 74 });
+      const [playing, setPlaying] = useState(false);
+      const [progress, setProgress] = useState(0);
+      const [currentTime, setCurrentTime] = useState(0);
+
+      const audioRef = useRef(null);
+      const urlRef = useRef(null);
+      const rawRef = useRef(null);
+
+      useEffect(() => {
+        return () => {
+          if (urlRef.current) URL.revokeObjectURL(urlRef.current);
+        };
+      }, []);
+
+      useEffect(() => {
+        const a = audioRef.current;
+        if (!a) return;
+        const onTime = () => {
+          setCurrentTime(a.currentTime);
+          setProgress(a.duration ? a.currentTime / a.duration : 0);
+        };
+        const onEnd = () => setPlaying(false);
+        a.addEventListener("timeupdate", onTime);
+        a.addEventListener("ended", onEnd);
+        return () => {
+          a.removeEventListener("timeupdate", onTime);
+          a.removeEventListener("ended", onEnd);
+        };
+      }, [song]);
+
+      const applyMixAndLoad = (raw, meta) => {
+        const blob = encodeWav(raw.samples, raw.sampleRate);
+        if (urlRef.current) URL.revokeObjectURL(urlRef.current);
+        const url = URL.createObjectURL(blob);
+        urlRef.current = url;
+        setSong({
+          url,
+          blob,
+          duration: raw.duration,
+          bpm: raw.bpm,
+          title: meta.title,
+          genre: meta.genre,
+          prompt: meta.prompt,
+        });
+        rawRef.current = raw;
+        setProgress(0);
+        setCurrentTime(0);
+        setPlaying(false);
+        requestAnimationFrame(() => {
+          if (audioRef.current) {
+            audioRef.current.src = url;
+            audioRef.current.load();
+          }
+        });
+      };
+
+      const createSong = async () => {
+        if (!prompt.trim() || status === "loading") return;
+        setStatus("loading");
+        setSong(null);
+        setPlaying(false);
+        await new Promise((r) => setTimeout(r, 80));
+        const raw = generateTrack(prompt.trim(), genre, mix);
+        await new Promise((r) => setTimeout(r, 900));
+        applyMixAndLoad(raw, { title: prompt.trim(), genre, prompt: prompt.trim() });
+        setStatus("ready");
+      };
+
+      const remix = (nextMix) => {
+        setMix(nextMix);
+        if (status !== "ready") return;
+        const raw = generateTrack(prompt.trim(), genre, nextMix);
+        const wasPlaying = playing;
+        const t = audioRef.current ? audioRef.current.currentTime : 0;
+        applyMixAndLoad(raw, { title: prompt.trim(), genre, prompt: prompt.trim() });
+        requestAnimationFrame(() => {
+          if (audioRef.current) {
+            audioRef.current.currentTime = Math.min(t, raw.duration - 0.05);
+            if (wasPlaying) audioRef.current.play();
+          }
+        });
+      };
+
+      const togglePlay = async () => {
+        const a = audioRef.current;
+        if (!a || !song) return;
+        if (playing) {
+          a.pause();
+          setPlaying(false);
+        } else {
+          try {
+            await a.play();
+            setPlaying(true);
+          } catch (e) {
+            setPlaying(false);
+          }
+        }
+      };
+
+      const seek = (e) => {
+        const a = audioRef.current;
+        if (!a || !song) return;
+        const rect = e.currentTarget.getBoundingClientRect();
+        const ratio = clamp((e.clientX - rect.left) / rect.width, 0, 1);
+        a.currentTime = ratio * (a.duration || song.duration);
+      };
+
+      const download = () => {
+        if (!song) return;
+        const a = document.createElement("a");
+        a.href = song.url;
+        a.download = slugify(song.title) + ".wav";
+        document.body.appendChild(a);
+        a.click();
+        a.remove();
+      };
+
+      const bars = useMemo(() => [18, 28, 22, 32, 16], []);
+
+      return (
+        <div className="min-h-screen flex flex-col">
+          <header className="px-5 pt-8 pb-4 max-w-xl mx-auto w-full">
+            <div className="flex items-center gap-3">
+              <div className="w-11 h-11 rounded-2xl bg-gradient-to-br from-neon to-neon-glow grid place-items-center shadow-glow">
+                <svg viewBox="0 0 24 24" className="w-6 h-6 text-ink-950 fill-current">
+                  <path d="M9 4v11.3A3.5 3.5 0 1 0 11 18V8h6V4H9z" />
+                </svg>
+              </div>
+              <div>
+                <h1 className="text-2xl font-semibold tracking-tight">EasyBeat Maker</h1>
+                <p className="text-sm text-slate-400">Musik in einem Satz. Kein Konto. Keine Credits.</p>
+              </div>
+            </div>
+          </header>
+
+          <main className="flex-1 px-5 pb-10 max-w-xl mx-auto w-full space-y-5">
+            <section className="rounded-3xl bg-ink-800/80 border border-white/5 shadow-card p-5 sm:p-6 space-y-4">
+              <label className="block text-sm font-medium text-slate-300">Dein Song-Wunsch</label>
+              <textarea
+                value={prompt}
+                onChange={(e) => setPrompt(e.target.value)}
+                rows={4}
+                placeholder="z. B. Fröhlicher Pop-Song mit Gitarre und klarem Gesang"
+                className="w-full resize-none rounded-2xl bg-ink-900 border border-white/10 px-4 py-3 text-base text-slate-100 placeholder:text-slate-500 focus:border-neon/60 focus:ring-2 focus:ring-neon/20 transition"
+              />
+
+              <div className="space-y-2">
+                <label className="block text-sm font-medium text-slate-300">Genre</label>
+                <div className="relative">
+                  <select
+                    value={genre}
+                    onChange={(e) => setGenre(e.target.value)}
+                    className="w-full appearance-none rounded-2xl bg-ink-900 border border-white/10 px-4 py-3 text-base text-slate-100 focus:border-neon/60 focus:ring-2 focus:ring-neon/20 transition"
+                  >
+                    {GENRES.map((g) => (
+                      <option key={g.id} value={g.id}>{g.label}</option>
+                    ))}
+                  </select>
+                  <span className="pointer-events-none absolute right-4 top-1/2 -translate-y-1/2 text-slate-400">▾</span>
+                </div>
+              </div>
+
+              <button
+                type="button"
+                onClick={createSong}
+                disabled={status === "loading" || !prompt.trim()}
+                className="w-full h-14 rounded-2xl font-semibold text-ink-950 bg-gradient-to-r from-neon to-neon-glow shadow-glow disabled:opacity-60 disabled:shadow-none transition active:scale-[0.99]"
+              >
+                {status === "loading" ? (
+                  <span className="flex items-center justify-center gap-3">
+                    <span className="flex items-end gap-0.5 h-5">
+                      {bars.map((h, i) => (
+                        <span key={i} className="eq-bar w-1 rounded-full bg-ink-950" style={{ height: h }} />
+                      ))}
+                    </span>
+                    Dein Song wird komponiert...
+                  </span>
+                ) : (
+                  "Song erstellen"
+                )}
+              </button>
+              <p className="text-center text-xs text-slate-500">Ein Klick. Fertig. Frei nutzbar für eigene Projekte.</p>
+            </section>
+
+            {status === "ready" && song && (
+              <section className="rounded-3xl bg-ink-800/80 border border-white/5 shadow-card p-5 sm:p-6 space-y-5">
+                <div className="flex items-start justify-between gap-3">
+                  <div>
+                    <p className="text-xs uppercase tracking-wider text-neon-soft">Neuer Track</p>
+                    <h2 className="text-lg font-medium leading-snug mt-1 line-clamp-2">{song.title}</h2>
+                    <p className="text-sm text-slate-400 mt-1 capitalize">{GENRES.find(g => g.id === song.genre)?.label} · {Math.round(song.bpm)} BPM · {formatTime(song.duration)}</p>
+                  </div>
+                </div>
+
+                <div className="flex items-center gap-4">
+                  <button
+                    type="button"
+                    onClick={togglePlay}
+                    className="shrink-0 w-14 h-14 rounded-full bg-white text-ink-950 grid place-items-center shadow-lg hover:scale-105 transition"
+                    aria-label={playing ? "Pause" : "Play"}
+                  >
+                    {playing ? <IconPause /> : <IconPlay />}
+                  </button>
+                  <div className="flex-1 min-w-0">
+                    <button
+                      type="button"
+                      onClick={seek}
+                      className="w-full h-3 rounded-full bg-ink-600 overflow-hidden cursor-pointer"
+                      aria-label="Zeitleiste"
+                    >
+                      <span
+                        className="block h-full rounded-full bg-gradient-to-r from-neon to-neon-glow"
+                        style={{ width: (progress * 100) + "%" }}
+                      />
+                    </button>
+                    <div className="flex justify-between text-xs text-slate-400 mt-1.5 tabular-nums">
+                      <span>{formatTime(currentTime)}</span>
+                      <span>{formatTime(song.duration)}</span>
+                    </div>
+                  </div>
+                </div>
+
+                <audio ref={audioRef} preload="auto" />
+
+                <button
+                  type="button"
+                  onClick={download}
+                  className="w-full h-12 rounded-2xl border border-white/15 bg-ink-900 hover:bg-ink-700 transition font-medium flex items-center justify-center gap-2"
+                >
+                  <IconDownload />
+                  Song herunterladen (WAV)
+                </button>
+                <p className="text-[11px] text-center text-slate-500 -mt-2">
+                  Speichert lokal auf dein Gerät. Frei für YouTube und eigene Projekte.
+                </p>
+              </section>
+            )}
+
+            <section className="rounded-3xl border border-white/5 bg-ink-900/50 overflow-hidden">
+              <button
+                type="button"
+                onClick={() => setAdvancedOpen((v) => !v)}
+                className="w-full px-5 py-3.5 flex items-center justify-between text-sm text-slate-400 hover:text-slate-200 transition"
+              >
+                <span>Erweitert (Optional)</span>
+                <span className={"transition " + (advancedOpen ? "rotate-180" : "")}>▾</span>
+              </button>
+              {advancedOpen && (
+                <div className="px-5 pb-5 space-y-4 border-t border-white/5 pt-4">
+                  <p className="text-xs text-slate-500">Nur wenn du möchtest: Lautstärke der Spuren anpassen. Für den ersten Song nicht nötig.</p>
+                  {[
+                    ["vocals", "Gesang"],
+                    ["instruments", "Instrumente"],
+                    ["drums", "Schlagzeug"],
+                    ["bass", "Bass"],
+                  ].map(([key, label]) => (
+                    <div key={key}>
+                      <div className="flex justify-between text-sm mb-1.5">
+                        <span className="text-slate-300">{label}</span>
+                        <span className="text-slate-500 tabular-nums">{mix[key]}%</span>
+                      </div>
+                      <input
+                        type="range"
+                        min="0"
+                        max="100"
+                        value={mix[key]}
+                        onChange={(e) => {
+                          const next = { ...mix, [key]: Number(e.target.value) };
+                          if (status === "ready") remix(next);
+                          else setMix(next);
+                        }}
+                        className="w-full"
+                      />
+                    </div>
+                  ))}
+                </div>
+              )}
+            </section>
+          </main>
+
+          <footer className="px-5 pb-8 text-center text-xs text-slate-600">
+            EasyBeat Maker · gemacht für absolute Anfänger
+          </footer>
+        </div>
+      );
+    }
+
+    const root = ReactDOM.createRoot(document.getElementById("root"));
+    root.render(<App />);
+  </script>
+</body>
+</html>
